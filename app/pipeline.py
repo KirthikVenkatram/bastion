@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -92,7 +93,12 @@ def _result(finding: dict[str, Any], decision: str, reason: str) -> dict[str, An
     }
 
 
-async def _notify_ask(finding: dict[str, Any], reason: str) -> None:
+async def _notify_ask(
+    finding: dict[str, Any],
+    repo_full_name: str,
+    pr_number: int,
+    proposal: dict[str, str],
+) -> None:
     """Send an ask notification when the optional notifier is available."""
     try:
         from app.notify import email
@@ -104,9 +110,22 @@ async def _notify_ask(finding: dict[str, Any], reason: str) -> None:
     if notify is None:
         logger.warning("Ask notification module has no send_ask_notification function")
         return
-    outcome = notify(finding, reason)
-    if asyncio.iscoroutine(outcome):
-        await outcome
+    recipient = os.getenv("NOTIFY_EMAIL_TO")
+    if not recipient:
+        # TODO: Obtain the recipient from repository notification preferences.
+        logger.warning("Ask notification skipped because NOTIFY_EMAIL_TO is unset")
+        return
+    await notify(
+        recipient,
+        finding["cve_id"],
+        finding["package"],
+        finding["current_version"],
+        proposal["target_version"],
+        finding["epss_score"],
+        finding["in_kev"],
+        f"https://github.com/{repo_full_name}/pull/{pr_number}",
+        proposal["rationale"],
+    )
 
 
 async def run_pipeline(repo_full_name: str, installation_id: int) -> list[dict[str, Any]]:
@@ -180,7 +199,12 @@ async def run_pipeline(repo_full_name: str, installation_id: int) -> list[dict[s
                 if result["decision"] == "auto":
                     merge_pr(client, repo_full_name, result["pr_number"])
                 else:
-                    await _notify_ask(enriched, result["reason"])
+                    await _notify_ask(
+                        enriched,
+                        repo_full_name,
+                        result["pr_number"],
+                        proposal,
+                    )
             elif result["decision"] == "block":
                 result["issue_number"] = open_issue(
                     client,
