@@ -1,0 +1,2 @@
+[project
+dependencies = ["broken==1.0.0"]
