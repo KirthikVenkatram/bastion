@@ -1,15 +1,31 @@
 """Tests for the end-to-end remediation pipeline."""
 from contextlib import ExitStack
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 
 from app import pipeline
 
 
+class NotFoundError(Exception):
+    """Minimal Contents API 404 error used by the mock repository."""
+
+    status = 404
+
+
 @pytest.fixture
-def dependency() -> dict[str, str]:
-    return {"package": "requests", "current_version": "2.31.0", "ecosystem": "PyPI"}
+def github_client() -> MagicMock:
+    client = MagicMock()
+    package_manifest = MagicMock()
+    package_manifest.decoded_content = b'{"dependencies": {"requests": "2.31.0"}}'
+
+    def get_contents(path: str) -> MagicMock:
+        if path == "package.json":
+            return package_manifest
+        raise NotFoundError()
+
+    client.get_repo.return_value.get_contents.side_effect = get_contents
+    return client
 
 
 @pytest.fixture
@@ -37,15 +53,15 @@ def proposal() -> dict[str, str]:
 
 
 def pipeline_mocks(
-    dependency: dict[str, str], vulnerability: dict[str, object], proposal: dict[str, str]
+    github_client: MagicMock, vulnerability: dict[str, object], proposal: dict[str, str]
 ):
     return (
-        patch("app.pipeline.scan_manifests", return_value=[dependency]),
+        patch("app.pipeline.get_installation_client", return_value=github_client),
         patch("app.pipeline.fetch_osv_vulnerabilities", new=AsyncMock(return_value=[vulnerability])),
         patch("app.pipeline.fetch_epss_scores", new=AsyncMock(return_value={"CVE-2024-1234": 0.7})),
         patch("app.pipeline.fetch_kev_catalog", new=AsyncMock(return_value={"CVE-2024-1234"})),
         patch("app.pipeline.propose_fix", new=AsyncMock(return_value=proposal)),
-        patch("app.pipeline.get_installation_client", return_value=MagicMock()),
+        patch("app.pipeline._notify_ask", new=AsyncMock()),
         patch("app.pipeline.open_pr", return_value=42),
         patch("app.pipeline.merge_pr"),
         patch("app.pipeline.open_issue", return_value=84),
@@ -66,23 +82,28 @@ async def run_with_mocks(
 
 @pytest.mark.asyncio
 async def test_run_pipeline_auto_merges(
-    dependency: dict[str, str], vulnerability: dict[str, object], proposal: dict[str, str]
+    github_client: MagicMock, vulnerability: dict[str, object], proposal: dict[str, str]
 ) -> None:
     results, _, installed_mocks = await run_with_mocks(
-        list(pipeline_mocks(dependency, vulnerability, proposal)),
+        list(pipeline_mocks(github_client, vulnerability, proposal)),
         {"decision": "auto", "reason": "safe"},
     )
 
     assert results == [{"cve_id": "CVE-2024-1234", "package": "requests", "decision": "auto", "reason": "safe", "pr_number": 42, "issue_number": None}]
+    assert github_client.get_repo.return_value.get_contents.call_args_list == [
+        call("package.json"),
+        call("requirements.txt"),
+        call("pyproject.toml"),
+    ]
     installed_mocks[7].assert_called_once()
 
 
 @pytest.mark.asyncio
 async def test_run_pipeline_ask_opens_but_does_not_merge(
-    dependency: dict[str, str], vulnerability: dict[str, object], proposal: dict[str, str]
+    github_client: MagicMock, vulnerability: dict[str, object], proposal: dict[str, str]
 ) -> None:
     results, _, installed_mocks = await run_with_mocks(
-        list(pipeline_mocks(dependency, vulnerability, proposal)),
+        list(pipeline_mocks(github_client, vulnerability, proposal)),
         {"decision": "ask", "reason": "review"},
     )
 
@@ -93,10 +114,10 @@ async def test_run_pipeline_ask_opens_but_does_not_merge(
 
 @pytest.mark.asyncio
 async def test_run_pipeline_block_opens_issue(
-    dependency: dict[str, str], vulnerability: dict[str, object], proposal: dict[str, str]
+    github_client: MagicMock, vulnerability: dict[str, object], proposal: dict[str, str]
 ) -> None:
     results, _, installed_mocks = await run_with_mocks(
-        list(pipeline_mocks(dependency, vulnerability, proposal)),
+        list(pipeline_mocks(github_client, vulnerability, proposal)),
         {"decision": "block", "reason": "major bump"},
     )
 
@@ -107,9 +128,9 @@ async def test_run_pipeline_block_opens_issue(
 
 @pytest.mark.asyncio
 async def test_run_pipeline_blocks_when_model_has_no_confident_fix(
-    dependency: dict[str, str], vulnerability: dict[str, object], proposal: dict[str, str]
+    github_client: MagicMock, vulnerability: dict[str, object], proposal: dict[str, str]
 ) -> None:
-    mocks = list(pipeline_mocks(dependency, vulnerability, proposal))
+    mocks = list(pipeline_mocks(github_client, vulnerability, proposal))
     mocks[4] = patch("app.pipeline.propose_fix", new=AsyncMock(return_value=None))
     results, evaluate_gate, _ = await run_with_mocks(mocks, None)
 
@@ -121,10 +142,10 @@ async def test_run_pipeline_blocks_when_model_has_no_confident_fix(
 
 @pytest.mark.asyncio
 async def test_run_pipeline_continues_after_one_finding_fails(
-    dependency: dict[str, str], vulnerability: dict[str, object], proposal: dict[str, str]
+    github_client: MagicMock, vulnerability: dict[str, object], proposal: dict[str, str]
 ) -> None:
     second_vulnerability = {**vulnerability, "cve_id": "CVE-2024-5678", "package": "urllib3"}
-    mocks = list(pipeline_mocks(dependency, vulnerability, proposal))
+    mocks = list(pipeline_mocks(github_client, vulnerability, proposal))
     mocks[1] = patch(
         "app.pipeline.fetch_osv_vulnerabilities",
         new=AsyncMock(return_value=[vulnerability, second_vulnerability]),

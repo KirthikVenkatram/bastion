@@ -24,6 +24,14 @@ def _signature_is_valid(body: bytes, signature: str | None) -> bool:
     return hmac.compare_digest(signature.removeprefix("sha256="), expected)
 
 
+async def _run_pipeline_background(repo_full_name: str, installation_id: int) -> None:
+    """Run the pipeline while preserving webhook delivery on background failures."""
+    try:
+        await run_pipeline(repo_full_name, installation_id)
+    except Exception:
+        logger.exception("Background pipeline failed for %s", repo_full_name)
+
+
 @app.post("/webhook")
 async def handle_webhook(request: Request, background_tasks: BackgroundTasks) -> dict[str, str]:
     """Verify and acknowledge GitHub webhooks, scheduling push scans asynchronously."""
@@ -56,7 +64,7 @@ async def handle_webhook(request: Request, background_tasks: BackgroundTasks) ->
         if not isinstance(repo_full_name, str) or not isinstance(installation_id, int):
             logger.warning("Ignoring push webhook with invalid repository or installation")
             return {"status": "accepted"}
-        background_tasks.add_task(run_pipeline, repo_full_name, installation_id)
+        background_tasks.add_task(_run_pipeline_background, repo_full_name, installation_id)
         return {"status": "accepted"}
 
     logger.info("Ignoring unsupported GitHub webhook event: %s", event)

@@ -18,14 +18,14 @@ def scan_manifests(repo_root: str | Path) -> list[Dependency]:
     """Parse supported dependency manifests in a repo root."""
     root = Path(repo_root)
     dependencies: list[Dependency] = []
-    dependencies.extend(_parse_package_json(root / "package.json"))
-    dependencies.extend(_parse_requirements_txt(root / "requirements.txt"))
-    dependencies.extend(_parse_pyproject_toml(root / "pyproject.toml"))
+    dependencies.extend(_parse_package_json(_read_text(root / "package.json")))
+    dependencies.extend(_parse_requirements_txt(_read_text(root / "requirements.txt")))
+    dependencies.extend(_parse_pyproject_toml(_read_text(root / "pyproject.toml")))
     return dependencies
 
 
-def _parse_package_json(path: Path) -> list[Dependency]:
-    data = _read_json(path)
+def _parse_package_json(content: str) -> list[Dependency]:
+    data = _read_json(content)
     if not isinstance(data, dict):
         return []
 
@@ -42,14 +42,9 @@ def _parse_package_json(path: Path) -> list[Dependency]:
     return dependencies
 
 
-def _parse_requirements_txt(path: Path) -> list[Dependency]:
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return []
-
+def _parse_requirements_txt(content: str) -> list[Dependency]:
     dependencies: list[Dependency] = []
-    for line in lines:
+    for line in content.splitlines():
         match = _REQUIREMENT_PATTERN.match(line)
         if match is None:
             continue
@@ -59,8 +54,8 @@ def _parse_requirements_txt(path: Path) -> list[Dependency]:
     return dependencies
 
 
-def _parse_pyproject_toml(path: Path) -> list[Dependency]:
-    data = _read_toml(path)
+def _parse_pyproject_toml(content: str) -> list[Dependency]:
+    data = _read_toml(content)
     if not isinstance(data, dict):
         return []
 
@@ -96,17 +91,24 @@ def _parse_pep508_pin(requirement: Any) -> Dependency | None:
     return {"package": match.group(1), "current_version": match.group(2)}
 
 
-def _read_json(path: Path) -> Any | None:
+def _read_text(path: Path) -> str:
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        return path.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+
+
+def _read_json(content: str) -> Any | None:
+    try:
+        return json.loads(content)
+    except json.JSONDecodeError:
         return None
 
 
-def _read_toml(path: Path) -> dict[str, Any] | None:
+def _read_toml(content: str) -> dict[str, Any] | None:
     try:
-        return tomllib.loads(path.read_text(encoding="utf-8"))
-    except (OSError, tomllib.TOMLDecodeError):
+        return tomllib.loads(content)
+    except tomllib.TOMLDecodeError:
         return None
 
 

@@ -23,15 +23,21 @@ from app.enrich.kev_client import fetch_kev_catalog, is_in_kev
 from app.enrich.osv_client import fetch_osv_vulnerabilities
 from app.github_app.actions import get_installation_client, merge_pr, open_issue, open_pr
 from app.propose.gpt_fix import propose_fix
-
-try:
-    from app.scanner.manifest import scan_manifests
-except ModuleNotFoundError:
-    scan_manifests = None
+from app.scanner.manifest import (
+    _parse_package_json,
+    _parse_pyproject_toml,
+    _parse_requirements_txt,
+)
 
 POLICY_PATH = Path(__file__).parent.parent / "policy" / "gate.rego"
 
 logger = logging.getLogger(__name__)
+
+MANIFEST_PARSERS = (
+    ("package.json", "npm", _parse_package_json),
+    ("requirements.txt", "PyPI", _parse_requirements_txt),
+    ("pyproject.toml", "PyPI", _parse_pyproject_toml),
+)
 
 
 @dataclass
@@ -93,6 +99,27 @@ def _result(finding: dict[str, Any], decision: str, reason: str) -> dict[str, An
     }
 
 
+def _fetch_manifest_dependencies(client: Any, repo_full_name: str) -> list[dict[str, str]]:
+    """Fetch root manifests through GitHub's Contents API and parse dependencies."""
+    repository = client.get_repo(repo_full_name)
+    dependencies: list[dict[str, str]] = []
+    for manifest_path, ecosystem, parser in MANIFEST_PARSERS:
+        try:
+            manifest = repository.get_contents(manifest_path)
+        except Exception as error:
+            if getattr(error, "status", None) == 404:
+                continue
+            raise
+        if isinstance(manifest, list):
+            logger.warning("Skipping directory returned for manifest path %s", manifest_path)
+            continue
+        content = manifest.decoded_content.decode("utf-8")
+        dependencies.extend(
+            {**dependency, "ecosystem": ecosystem} for dependency in parser(content)
+        )
+    return dependencies
+
+
 async def _notify_ask(
     finding: dict[str, Any],
     repo_full_name: str,
@@ -130,22 +157,23 @@ async def _notify_ask(
 
 async def run_pipeline(repo_full_name: str, installation_id: int) -> list[dict[str, Any]]:
     """Scan, enrich, propose, gate, and act on dependency vulnerabilities."""
-    if scan_manifests is None:
-        logger.error("Manifest scanner is not available")
-        return []
+    logger.info("Starting Bastion pipeline for %s", repo_full_name)
 
     try:
-        dependencies = scan_manifests(repo_full_name)
+        client = get_installation_client(installation_id)
+        dependencies = _fetch_manifest_dependencies(client, repo_full_name)
+        logger.info("Scanned %s dependencies in %s", len(dependencies), repo_full_name)
         vulnerabilities = await fetch_osv_vulnerabilities(dependencies)
         epss_scores, kev_catalog = await asyncio.gather(
             fetch_epss_scores([vulnerability["cve_id"] for vulnerability in vulnerabilities]),
             fetch_kev_catalog(),
         )
+        logger.info("Enriched %s vulnerabilities in %s", len(vulnerabilities), repo_full_name)
     except Exception as error:
         logger.error("Pipeline discovery and enrichment failed: %s", error)
+        logger.info("Finished Bastion pipeline for %s with discovery failure", repo_full_name)
         return []
 
-    client = None
     results: list[dict[str, Any]] = []
     for vulnerability in vulnerabilities:
         try:
@@ -157,8 +185,11 @@ async def run_pipeline(repo_full_name: str, installation_id: int) -> list[dict[s
             proposal = await propose_fix(enriched)
             if proposal is None:
                 result = _result(enriched, "block", "no confident fix available")
-                if client is None:
-                    client = get_installation_client(installation_id)
+                logger.info(
+                    "Blocking %s in %s because no confident fix is available",
+                    enriched["cve_id"],
+                    enriched["package"],
+                )
                 result["issue_number"] = open_issue(
                     client,
                     repo_full_name,
@@ -183,8 +214,12 @@ async def run_pipeline(repo_full_name: str, installation_id: int) -> list[dict[s
             )
             gate_result = evaluate_gate(gate_finding)
             result = _result(enriched, gate_result["decision"], gate_result["reason"])
-            if client is None:
-                client = get_installation_client(installation_id)
+            logger.info(
+                "Gate decided %s for %s in %s",
+                result["decision"],
+                enriched["cve_id"],
+                enriched["package"],
+            )
 
             if result["decision"] in {"auto", "ask"}:
                 result["pr_number"] = open_pr(
@@ -225,4 +260,5 @@ async def run_pipeline(repo_full_name: str, installation_id: int) -> list[dict[s
             failed = _result(vulnerability, "error", "finding processing failed")
             failed["error"] = str(error)
             results.append(failed)
+    logger.info("Finished Bastion pipeline for %s with %s results", repo_full_name, len(results))
     return results
