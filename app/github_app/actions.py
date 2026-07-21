@@ -23,6 +23,28 @@ def _raise_action_error(action: str, error: Exception) -> NoReturn:
     raise BastionActionError(f"GitHub {action} failed") from error
 
 
+def _tracking_marker(cve_id: str, package: str) -> str:
+    return f"<!-- bastion-tracking: {cve_id}:{package} -->"
+
+
+def find_existing_bastion_item(
+    client: Github, repo_full_name: str, cve_id: str, package: str
+) -> int | None:
+    """Return the number of an open issue or PR already tracking a finding."""
+    marker = _tracking_marker(cve_id, package)
+    try:
+        repository = client.get_repo(repo_full_name)
+        for item in repository.get_issues(state="open"):
+            if marker in (item.body or ""):
+                return item.number
+        for pull_request in repository.get_pulls(state="open"):
+            if marker in (pull_request.body or ""):
+                return pull_request.number
+    except GithubException as error:
+        _raise_action_error("duplicate tracking lookup", error)
+    return None
+
+
 def get_installation_client(installation_id: int) -> Github:
     """Return a PyGithub client authenticated for one App installation."""
     try:
@@ -87,6 +109,7 @@ def _get_current_manifest(repo: object, path: str, branch: str) -> tuple[str, ob
 def open_pr(
     client: Github,
     repo_full_name: str,
+    cve_id: str,
     package: str,
     current_version: str,
     target_version: str,
@@ -114,7 +137,7 @@ def open_pr(
         title = f"Bastion: bump {package} {current_version} -> {target_version}"
         pull_request = repo.create_pull(
             title=title,
-            body=f"{rationale}{DISCLOSURE_FOOTER}",
+            body=f"{rationale}{DISCLOSURE_FOOTER}\n\n{_tracking_marker(cve_id, package)}",
             head=branch_name,
             base=default_branch,
         )
@@ -149,7 +172,7 @@ def open_issue(
     try:
         issue = client.get_repo(repo_full_name).create_issue(
             title=f"Bastion: {cve_id} in {package} — not auto-remediated",
-            body=reason,
+            body=f"{reason}\n\n{_tracking_marker(cve_id, package)}",
         )
         return issue.number
     except GithubException as error:

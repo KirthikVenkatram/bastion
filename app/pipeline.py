@@ -21,7 +21,13 @@ from typing import Any
 from app.enrich.epss_client import fetch_epss_scores
 from app.enrich.kev_client import fetch_kev_catalog, is_in_kev
 from app.enrich.osv_client import fetch_osv_vulnerabilities
-from app.github_app.actions import get_installation_client, merge_pr, open_issue, open_pr
+from app.github_app.actions import (
+    find_existing_bastion_item,
+    get_installation_client,
+    merge_pr,
+    open_issue,
+    open_pr,
+)
 from app.propose.gpt_fix import propose_fix
 from app.scanner.manifest import (
     _parse_package_json,
@@ -96,6 +102,7 @@ def _result(finding: dict[str, Any], decision: str, reason: str) -> dict[str, An
         "reason": reason,
         "pr_number": None,
         "issue_number": None,
+        "duplicate_of": None,
     }
 
 
@@ -182,6 +189,23 @@ async def run_pipeline(repo_full_name: str, installation_id: int) -> list[dict[s
                 "epss_score": epss_scores.get(vulnerability["cve_id"], 0.0),
                 "in_kev": is_in_kev(vulnerability["cve_id"], kev_catalog),
             }
+            existing_item = find_existing_bastion_item(
+                client,
+                repo_full_name,
+                enriched["cve_id"],
+                enriched["package"],
+            )
+            if existing_item is not None:
+                logger.info(
+                    "Skipping %s in %s because item #%s already tracks it",
+                    enriched["cve_id"],
+                    enriched["package"],
+                    existing_item,
+                )
+                duplicate = _result(enriched, "duplicate", "already tracked by Bastion")
+                duplicate["duplicate_of"] = existing_item
+                results.append(duplicate)
+                continue
             proposal = await propose_fix(enriched)
             if proposal is None:
                 result = _result(enriched, "block", "no confident fix available")
@@ -225,6 +249,7 @@ async def run_pipeline(repo_full_name: str, installation_id: int) -> list[dict[s
                 result["pr_number"] = open_pr(
                     client,
                     repo_full_name,
+                    enriched["cve_id"],
                     enriched["package"],
                     enriched["current_version"],
                     proposal["target_version"],

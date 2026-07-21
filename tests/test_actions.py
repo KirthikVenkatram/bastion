@@ -3,7 +3,13 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from app.github_app.actions import DISCLOSURE_FOOTER, merge_pr, open_issue, open_pr
+from app.github_app.actions import (
+    DISCLOSURE_FOOTER,
+    find_existing_bastion_item,
+    merge_pr,
+    open_issue,
+    open_pr,
+)
 
 
 @pytest.fixture
@@ -38,6 +44,7 @@ def test_open_pr_creates_branch_updates_manifest_and_opens_pr(
     pr_number = open_pr(
         client,
         "acme/project",
+        "CVE-2024-1234",
         "requests",
         "2.31.0",
         "2.32.0",
@@ -57,7 +64,9 @@ def test_open_pr_creates_branch_updates_manifest_and_opens_pr(
         branch="bastion/requests-2.32.0",
     )
     assert repo.create_pull.call_args.kwargs["body"] == (
-        "Bumps requests to its fixed version." + DISCLOSURE_FOOTER
+        "Bumps requests to its fixed version."
+        + DISCLOSURE_FOOTER
+        + "\n\n<!-- bastion-tracking: CVE-2024-1234:requests -->"
     )
 
 
@@ -95,5 +104,43 @@ def test_open_issue_creates_blocking_issue(client_and_repo: tuple[MagicMock, Mag
     assert issue_number == 84
     repo.create_issue.assert_called_once_with(
         title="Bastion: CVE-2024-1234 in requests — not auto-remediated",
-        body="No fixed version is available.",
+        body=(
+            "No fixed version is available."
+            "\n\n<!-- bastion-tracking: CVE-2024-1234:requests -->"
+        ),
     )
+
+
+def test_find_existing_bastion_item_matches_open_issue(
+    client_and_repo: tuple[MagicMock, MagicMock],
+) -> None:
+    client, repo = client_and_repo
+    issue = MagicMock()
+    issue.number = 84
+    issue.body = "Details\n\n<!-- bastion-tracking: CVE-2024-1234:requests -->"
+    repo.get_issues.return_value = [issue]
+    repo.get_pulls.return_value = []
+
+    existing_number = find_existing_bastion_item(
+        client, "acme/project", "CVE-2024-1234", "requests"
+    )
+
+    assert existing_number == 84
+    repo.get_pulls.assert_not_called()
+
+
+def test_find_existing_bastion_item_matches_open_pull_request(
+    client_and_repo: tuple[MagicMock, MagicMock],
+) -> None:
+    client, repo = client_and_repo
+    pull_request = MagicMock()
+    pull_request.number = 42
+    pull_request.body = "<!-- bastion-tracking: CVE-2024-1234:requests -->"
+    repo.get_issues.return_value = []
+    repo.get_pulls.return_value = [pull_request]
+
+    existing_number = find_existing_bastion_item(
+        client, "acme/project", "CVE-2024-1234", "requests"
+    )
+
+    assert existing_number == 42

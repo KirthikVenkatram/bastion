@@ -57,6 +57,7 @@ def pipeline_mocks(
 ):
     return (
         patch("app.pipeline.get_installation_client", return_value=github_client),
+        patch("app.pipeline.find_existing_bastion_item", return_value=None),
         patch("app.pipeline.fetch_osv_vulnerabilities", new=AsyncMock(return_value=[vulnerability])),
         patch("app.pipeline.fetch_epss_scores", new=AsyncMock(return_value={"CVE-2024-1234": 0.7})),
         patch("app.pipeline.fetch_kev_catalog", new=AsyncMock(return_value={"CVE-2024-1234"})),
@@ -89,13 +90,13 @@ async def test_run_pipeline_auto_merges(
         {"decision": "auto", "reason": "safe"},
     )
 
-    assert results == [{"cve_id": "CVE-2024-1234", "package": "requests", "decision": "auto", "reason": "safe", "pr_number": 42, "issue_number": None}]
+    assert results == [{"cve_id": "CVE-2024-1234", "package": "requests", "decision": "auto", "reason": "safe", "pr_number": 42, "issue_number": None, "duplicate_of": None}]
     assert github_client.get_repo.return_value.get_contents.call_args_list == [
         call("package.json"),
         call("requirements.txt"),
         call("pyproject.toml"),
     ]
-    installed_mocks[7].assert_called_once()
+    installed_mocks[8].assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -109,7 +110,7 @@ async def test_run_pipeline_ask_opens_but_does_not_merge(
 
     assert results[0]["decision"] == "ask"
     assert results[0]["pr_number"] == 42
-    installed_mocks[7].assert_not_called()
+    installed_mocks[8].assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -123,7 +124,7 @@ async def test_run_pipeline_block_opens_issue(
 
     assert results[0]["decision"] == "block"
     assert results[0]["issue_number"] == 84
-    installed_mocks[8].assert_called_once()
+    installed_mocks[9].assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -131,7 +132,7 @@ async def test_run_pipeline_blocks_when_model_has_no_confident_fix(
     github_client: MagicMock, vulnerability: dict[str, object], proposal: dict[str, str]
 ) -> None:
     mocks = list(pipeline_mocks(github_client, vulnerability, proposal))
-    mocks[4] = patch("app.pipeline.propose_fix", new=AsyncMock(return_value=None))
+    mocks[5] = patch("app.pipeline.propose_fix", new=AsyncMock(return_value=None))
     results, evaluate_gate, _ = await run_with_mocks(mocks, None)
 
     assert results[0]["decision"] == "block"
@@ -146,11 +147,11 @@ async def test_run_pipeline_continues_after_one_finding_fails(
 ) -> None:
     second_vulnerability = {**vulnerability, "cve_id": "CVE-2024-5678", "package": "urllib3"}
     mocks = list(pipeline_mocks(github_client, vulnerability, proposal))
-    mocks[1] = patch(
+    mocks[2] = patch(
         "app.pipeline.fetch_osv_vulnerabilities",
         new=AsyncMock(return_value=[vulnerability, second_vulnerability]),
     )
-    mocks[6] = patch("app.pipeline.open_pr", side_effect=[RuntimeError("GitHub unavailable"), 43])
+    mocks[7] = patch("app.pipeline.open_pr", side_effect=[RuntimeError("GitHub unavailable"), 43])
     results, _, installed_mocks = await run_with_mocks(
         mocks, {"decision": "auto", "reason": "safe"}
     )
@@ -159,7 +160,25 @@ async def test_run_pipeline_continues_after_one_finding_fails(
     assert results[0]["error"] == "GitHub unavailable"
     assert results[1]["decision"] == "auto"
     assert results[1]["pr_number"] == 43
-    installed_mocks[7].assert_called_once()
+    installed_mocks[8].assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_run_pipeline_skips_existing_bastion_item(
+    github_client: MagicMock, vulnerability: dict[str, object], proposal: dict[str, str]
+) -> None:
+    mocks = list(pipeline_mocks(github_client, vulnerability, proposal))
+    mocks[1] = patch("app.pipeline.find_existing_bastion_item", return_value=77)
+
+    results, evaluate_gate, installed_mocks = await run_with_mocks(
+        mocks, {"decision": "auto", "reason": "safe"}
+    )
+
+    assert results == [{"cve_id": "CVE-2024-1234", "package": "requests", "decision": "duplicate", "reason": "already tracked by Bastion", "pr_number": None, "issue_number": None, "duplicate_of": 77}]
+    evaluate_gate.assert_not_called()
+    installed_mocks[5].assert_not_awaited()
+    installed_mocks[7].assert_not_called()
+    installed_mocks[9].assert_not_called()
 
 
 @pytest.mark.parametrize(
