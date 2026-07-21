@@ -106,6 +106,15 @@ def _get_current_manifest(repo: object, path: str, branch: str) -> tuple[str, ob
         return matching_paths[0], repo.get_contents(matching_paths[0], ref=branch)
 
 
+def _branch_name(package: str, target_version: str, cve_id: str) -> str:
+    cve_suffix = cve_id.lower().replace("-", "")
+    return f"bastion/{package}-{target_version}-{cve_suffix}"
+
+
+def _is_existing_reference_error(error: GithubException) -> bool:
+    return error.status == 422 and "reference already exists" in str(error).lower()
+
+
 def open_pr(
     client: Github,
     repo_full_name: str,
@@ -120,13 +129,23 @@ def open_pr(
     try:
         repo = client.get_repo(repo_full_name)
         default_branch = repo.default_branch
-        manifest_path = _manifest_path(diff)
-        manifest_path, manifest = _get_current_manifest(repo, manifest_path, default_branch)
-        updated_content = _apply_diff(manifest.decoded_content.decode("utf-8"), diff)
-
-        branch_name = f"bastion/{package}-{target_version}"
+        branch_name = _branch_name(package, target_version, cve_id)
         base_branch = repo.get_branch(default_branch)
-        repo.create_git_ref(ref=f"refs/heads/{branch_name}", sha=base_branch.commit.sha)
+        try:
+            repo.create_git_ref(ref=f"refs/heads/{branch_name}", sha=base_branch.commit.sha)
+        except GithubException as error:
+            if not _is_existing_reference_error(error):
+                raise
+            existing_branch = repo.get_branch(branch_name)
+            logger.warning(
+                "Reusing existing Bastion branch %s at %s",
+                branch_name,
+                existing_branch.commit.sha,
+            )
+
+        manifest_path = _manifest_path(diff)
+        manifest_path, manifest = _get_current_manifest(repo, manifest_path, branch_name)
+        updated_content = _apply_diff(manifest.decoded_content.decode("utf-8"), diff)
         repo.update_file(
             manifest_path,
             f"Bastion: bump {package} to {target_version}",
