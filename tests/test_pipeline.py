@@ -117,6 +117,82 @@ async def test_run_pipeline_ask_opens_but_does_not_merge(
 
 
 @pytest.mark.asyncio
+async def test_notify_ask_sends_to_pusher_and_configured_recipients(
+    vulnerability: dict[str, object], proposal: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("NOTIFY_EMAIL_TO", "maintainer@example.com")
+    enriched_finding = {**vulnerability, "epss_score": 0.7, "in_kev": True}
+
+    with patch("app.notify.email.send_ask_notification", new=AsyncMock()) as notify:
+        await pipeline._notify_ask(
+            enriched_finding,
+            "acme/project",
+            42,
+            proposal,
+            "pusher@example.com",
+        )
+
+    assert notify.await_args.args[0] == ["pusher@example.com", "maintainer@example.com"]
+
+
+@pytest.mark.asyncio
+async def test_notify_ask_sends_to_pusher_when_static_recipient_is_missing(
+    vulnerability: dict[str, object], proposal: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("NOTIFY_EMAIL_TO", raising=False)
+    enriched_finding = {**vulnerability, "epss_score": 0.7, "in_kev": True}
+
+    with patch("app.notify.email.send_ask_notification", new=AsyncMock()) as notify:
+        await pipeline._notify_ask(
+            enriched_finding, "acme/project", 42, proposal, "pusher@example.com"
+        )
+
+    assert notify.await_args.args[0] == ["pusher@example.com"]
+
+
+@pytest.mark.asyncio
+async def test_notify_ask_sends_to_static_recipient_when_pusher_is_missing(
+    vulnerability: dict[str, object], proposal: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("NOTIFY_EMAIL_TO", "maintainer@example.com")
+    enriched_finding = {**vulnerability, "epss_score": 0.7, "in_kev": True}
+
+    with patch("app.notify.email.send_ask_notification", new=AsyncMock()) as notify:
+        await pipeline._notify_ask(enriched_finding, "acme/project", 42, proposal, None)
+
+    assert notify.await_args.args[0] == ["maintainer@example.com"]
+
+
+@pytest.mark.asyncio
+async def test_notify_ask_deduplicates_matching_recipient_addresses(
+    vulnerability: dict[str, object], proposal: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("NOTIFY_EMAIL_TO", "same@example.com")
+    enriched_finding = {**vulnerability, "epss_score": 0.7, "in_kev": True}
+
+    with patch("app.notify.email.send_ask_notification", new=AsyncMock()) as notify:
+        await pipeline._notify_ask(
+            enriched_finding, "acme/project", 42, proposal, "same@example.com"
+        )
+
+    assert notify.await_args.args[0] == ["same@example.com"]
+
+
+@pytest.mark.asyncio
+async def test_notify_ask_skips_when_no_recipients_are_available(
+    vulnerability: dict[str, object], proposal: dict[str, str], monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.delenv("NOTIFY_EMAIL_TO", raising=False)
+    enriched_finding = {**vulnerability, "epss_score": 0.7, "in_kev": True}
+
+    with patch("app.notify.email.send_ask_notification", new=AsyncMock()) as notify:
+        await pipeline._notify_ask(enriched_finding, "acme/project", 42, proposal, None)
+
+    notify.assert_not_awaited()
+    assert "no recipient email is available" in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_run_pipeline_block_opens_issue(
     github_client: MagicMock, vulnerability: dict[str, object], proposal: dict[str, str]
 ) -> None:

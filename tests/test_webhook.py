@@ -27,7 +27,11 @@ def signed_headers(event: str, payload: bytes) -> dict[str, str]:
 
 def test_valid_push_schedules_pipeline(client: TestClient) -> None:
     payload = json.dumps(
-        {"repository": {"full_name": "acme/project"}, "installation": {"id": 12}}
+        {
+            "repository": {"full_name": "acme/project"},
+            "installation": {"id": 12},
+            "pusher": {"name": "octocat", "email": "octocat@example.com"},
+        }
     ).encode()
 
     with patch("app.github_app.webhook.run_pipeline", new=AsyncMock()) as run_pipeline:
@@ -35,7 +39,7 @@ def test_valid_push_schedules_pipeline(client: TestClient) -> None:
 
     assert response.status_code == 200
     assert response.json() == {"status": "accepted"}
-    run_pipeline.assert_awaited_once_with("acme/project", 12)
+    run_pipeline.assert_awaited_once_with("acme/project", 12, "octocat@example.com")
 
 
 def test_invalid_signature_is_rejected(client: TestClient) -> None:

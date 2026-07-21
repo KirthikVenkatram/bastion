@@ -149,6 +149,7 @@ async def _notify_ask(
     repo_full_name: str,
     pr_number: int,
     proposal: dict[str, str],
+    pusher_email: str | None,
 ) -> None:
     """Send an ask notification when the optional notifier is available."""
     try:
@@ -161,13 +162,19 @@ async def _notify_ask(
     if notify is None:
         logger.warning("Ask notification module has no send_ask_notification function")
         return
-    recipient = os.getenv("NOTIFY_EMAIL_TO")
-    if not recipient:
-        # TODO: Obtain the recipient from repository notification preferences.
-        logger.warning("Ask notification skipped because NOTIFY_EMAIL_TO is unset")
+    recipient_candidates = (pusher_email, os.getenv("NOTIFY_EMAIL_TO"))
+    recipients = list(
+        dict.fromkeys(
+            recipient.strip()
+            for recipient in recipient_candidates
+            if isinstance(recipient, str) and recipient.strip()
+        )
+    )
+    if not recipients:
+        logger.warning("Ask notification skipped because no recipient email is available")
         return
     await notify(
-        recipient,
+        recipients,
         finding["cve_id"],
         finding["package"],
         finding["current_version"],
@@ -179,7 +186,9 @@ async def _notify_ask(
     )
 
 
-async def run_pipeline(repo_full_name: str, installation_id: int) -> list[dict[str, Any]]:
+async def run_pipeline(
+    repo_full_name: str, installation_id: int, pusher_email: str | None = None
+) -> list[dict[str, Any]]:
     """Scan, enrich, propose, gate, and act on dependency vulnerabilities."""
     logger.info("Starting Bastion pipeline for %s", repo_full_name)
 
@@ -337,6 +346,7 @@ async def run_pipeline(repo_full_name: str, installation_id: int) -> list[dict[s
                     repo_full_name,
                     pr_number,
                     selected["proposal"],
+                    pusher_email,
                 )
             for candidate in candidates:
                 others = [

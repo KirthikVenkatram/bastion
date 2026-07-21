@@ -38,7 +38,7 @@ def _email_body(
 
 
 async def send_ask_notification(
-    to_email: str,
+    to_emails: list[str],
     cve_id: str,
     package: str,
     current_version: str,
@@ -60,7 +60,7 @@ async def send_ask_notification(
     resend.api_key = api_key
     message = {
         "from": sender,
-        "to": [to_email],
+        "to": to_emails,
         "subject": f"Bastion: {cve_id} in {package} needs your approval",
         "text": _email_body(
             cve_id,

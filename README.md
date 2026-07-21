@@ -12,7 +12,7 @@ Bastion is a GitHub App that watches any repo, resolves its dependencies to know
 
 ## Architecture
 
-![Bastion architecture](docs/Bastion_Arch.png)
+![Bastion architecture](docs/Bastion-Arch.png)
 
 1. Scan a repo's manifest (`package.json`, `requirements.txt`, `pyproject.toml`)
 2. Resolve dependencies to CVEs via [OSV.dev](https://osv.dev)
@@ -97,6 +97,7 @@ GPT-5.6 — via Codex — wrote the large majority of this codebase. Inside the 
 - Multiple CVEs affecting the same package can currently generate separate PRs rather than consolidating into one fix — a production deployment would want per-package fix consolidation instead of per-CVE.
 - Ecosystem support is currently Python and Node manifests; a broader rollout would add Go, Rust, and Java.
 - The "ask" path's email notification is best-effort (Resend) and degrades gracefully if unconfigured — the PR itself remains the source of truth either way.
+- Note on the "ask" email path: notifications are sent to the email address of whoever pushed the triggering commit (from the GitHub webhook payload). Delivery depends on Resend's sandbox sender being able to reach that address — if you don't receive it, the PR itself is always the reliable source of truth and visible directly in the repo regardless of email delivery.
 
 ## License
 

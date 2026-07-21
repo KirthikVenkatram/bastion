@@ -13,7 +13,7 @@ async def test_send_ask_notification_sends_security_alert(monkeypatch: pytest.Mo
 
     with patch("app.notify.email.resend.Emails.send") as send:
         sent = await send_ask_notification(
-            "maintainer@example.com",
+            ["pusher@example.com", "maintainer@example.com"],
             "CVE-2024-1234",
             "requests",
             "2.31.0",
@@ -28,6 +28,7 @@ async def test_send_ask_notification_sends_security_alert(monkeypatch: pytest.Mo
     assert send.call_args.args[0]["subject"] == (
         "Bastion: CVE-2024-1234 in requests needs your approval"
     )
+    assert send.call_args.args[0]["to"] == ["pusher@example.com", "maintainer@example.com"]
     assert "actively exploited" in send.call_args.args[0]["text"]
 
 
@@ -40,7 +41,7 @@ async def test_send_ask_notification_returns_false_on_api_failure(
 
     with patch("app.notify.email.resend.Emails.send", side_effect=RuntimeError("Resend failed")):
         sent = await send_ask_notification(
-            "maintainer@example.com",
+            ["maintainer@example.com"],
             "CVE-2024-1234",
             "requests",
             "2.31.0",
@@ -63,7 +64,7 @@ async def test_send_ask_notification_returns_false_when_configuration_is_missing
 
     with patch("app.notify.email.resend.Emails.send") as send:
         sent = await send_ask_notification(
-            "maintainer@example.com",
+            ["maintainer@example.com"],
             "CVE-2024-1234",
             "requests",
             "2.31.0",
