@@ -70,13 +70,16 @@ def pipeline_mocks(
 
 
 async def run_with_mocks(
-    mocks: list, gate_result: dict | None
+    mocks: list, gate_result: dict | list[dict] | None
 ) -> tuple[list[dict], MagicMock, list[MagicMock]]:
     with ExitStack() as stack:
         installed_mocks = [stack.enter_context(mock) for mock in mocks]
-        evaluate_gate = stack.enter_context(
-            patch("app.pipeline.evaluate_gate", return_value=gate_result)
+        gate_patch = (
+            patch("app.pipeline.evaluate_gate", side_effect=gate_result)
+            if isinstance(gate_result, list)
+            else patch("app.pipeline.evaluate_gate", return_value=gate_result)
         )
+        evaluate_gate = stack.enter_context(gate_patch)
         results = await pipeline.run_pipeline("acme/project", 1)
     return results, evaluate_gate, installed_mocks
 
@@ -179,6 +182,86 @@ async def test_run_pipeline_skips_existing_bastion_item(
     installed_mocks[5].assert_not_awaited()
     installed_mocks[7].assert_not_called()
     installed_mocks[9].assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_run_pipeline_consolidates_auto_findings_for_one_package(
+    github_client: MagicMock, vulnerability: dict[str, object], proposal: dict[str, str]
+) -> None:
+    higher_vulnerability = {**vulnerability, "cve_id": "CVE-2024-5678", "fixed_version": "2.33.0"}
+    higher_proposal = {
+        **proposal,
+        "target_version": "2.33.0",
+        "diff": proposal["diff"].replace("2.32.0", "2.33.0"),
+        "rationale": "Bumps requests to a higher published security fix.",
+    }
+    mocks = list(pipeline_mocks(github_client, vulnerability, proposal))
+    mocks[2] = patch(
+        "app.pipeline.fetch_osv_vulnerabilities",
+        new=AsyncMock(return_value=[vulnerability, higher_vulnerability]),
+    )
+    mocks[5] = patch(
+        "app.pipeline.propose_fix",
+        new=AsyncMock(side_effect=[proposal, higher_proposal]),
+    )
+    results, _, installed_mocks = await run_with_mocks(
+        mocks,
+        [{"decision": "auto", "reason": "safe"}, {"decision": "auto", "reason": "safe"}],
+    )
+
+    assert installed_mocks[7].call_count == 1
+    assert installed_mocks[7].call_args.args[5] == "2.33.0"
+    assert "CVE-2024-1234" in installed_mocks[7].call_args.args[7]
+    assert "CVE-2024-5678" in installed_mocks[7].call_args.args[7]
+    assert [result["pr_number"] for result in results] == [42, 42]
+    assert results[0]["consolidated_with"] == ["CVE-2024-5678"]
+    assert results[1]["consolidated_with"] == ["CVE-2024-1234"]
+    installed_mocks[8].assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_run_pipeline_consolidates_auto_and_ask_as_ask(
+    github_client: MagicMock, vulnerability: dict[str, object], proposal: dict[str, str]
+) -> None:
+    second_vulnerability = {**vulnerability, "cve_id": "CVE-2024-5678"}
+    mocks = list(pipeline_mocks(github_client, vulnerability, proposal))
+    mocks[2] = patch(
+        "app.pipeline.fetch_osv_vulnerabilities",
+        new=AsyncMock(return_value=[vulnerability, second_vulnerability]),
+    )
+    mocks[5] = patch("app.pipeline.propose_fix", new=AsyncMock(side_effect=[proposal, proposal]))
+    results, _, installed_mocks = await run_with_mocks(
+        mocks,
+        [{"decision": "auto", "reason": "safe"}, {"decision": "ask", "reason": "review"}],
+    )
+
+    assert [result["decision"] for result in results] == ["ask", "ask"]
+    installed_mocks[7].assert_called_once()
+    installed_mocks[8].assert_not_called()
+    installed_mocks[6].assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_run_pipeline_keeps_block_finding_separate_from_consolidated_pr(
+    github_client: MagicMock, vulnerability: dict[str, object], proposal: dict[str, str]
+) -> None:
+    block_vulnerability = {**vulnerability, "cve_id": "CVE-2024-5678"}
+    mocks = list(pipeline_mocks(github_client, vulnerability, proposal))
+    mocks[2] = patch(
+        "app.pipeline.fetch_osv_vulnerabilities",
+        new=AsyncMock(return_value=[vulnerability, block_vulnerability]),
+    )
+    mocks[5] = patch("app.pipeline.propose_fix", new=AsyncMock(side_effect=[proposal, proposal]))
+    results, _, installed_mocks = await run_with_mocks(
+        mocks,
+        [{"decision": "auto", "reason": "safe"}, {"decision": "block", "reason": "major bump"}],
+    )
+
+    assert results[0]["pr_number"] == 42
+    assert results[1]["decision"] == "block"
+    assert results[1]["issue_number"] == 84
+    installed_mocks[7].assert_called_once()
+    installed_mocks[9].assert_called_once()
 
 
 @pytest.mark.parametrize(

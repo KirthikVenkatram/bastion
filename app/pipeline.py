@@ -106,6 +106,23 @@ def _result(finding: dict[str, Any], decision: str, reason: str) -> dict[str, An
     }
 
 
+def _version_key(version: str) -> tuple[int, int, int]:
+    normalized = version.removeprefix("v").split("+", 1)[0].split("-", 1)[0]
+    parts = normalized.split(".")
+    if len(parts) != 3 or not all(part.isdigit() for part in parts):
+        return -1, -1, -1
+    return int(parts[0]), int(parts[1]), int(parts[2])
+
+
+def _consolidated_rationale(candidates: list[dict[str, Any]]) -> str:
+    lines = ["This dependency bump addresses the following vulnerabilities:"]
+    for candidate in candidates:
+        lines.append(
+            f"- {candidate['finding']['cve_id']}: {candidate['proposal']['rationale']}"
+        )
+    return "\n".join(lines)
+
+
 def _fetch_manifest_dependencies(client: Any, repo_full_name: str) -> list[dict[str, str]]:
     """Fetch root manifests through GitHub's Contents API and parse dependencies."""
     repository = client.get_repo(repo_full_name)
@@ -182,6 +199,7 @@ async def run_pipeline(repo_full_name: str, installation_id: int) -> list[dict[s
         return []
 
     results: list[dict[str, Any]] = []
+    actionable_by_package: dict[str, list[dict[str, Any]]] = {}
     for vulnerability in vulnerabilities:
         try:
             enriched = {
@@ -246,25 +264,10 @@ async def run_pipeline(repo_full_name: str, installation_id: int) -> list[dict[s
             )
 
             if result["decision"] in {"auto", "ask"}:
-                result["pr_number"] = open_pr(
-                    client,
-                    repo_full_name,
-                    enriched["cve_id"],
-                    enriched["package"],
-                    enriched["current_version"],
-                    proposal["target_version"],
-                    proposal["diff"],
-                    proposal["rationale"],
+                actionable_by_package.setdefault(enriched["package"], []).append(
+                    {"finding": enriched, "proposal": proposal, "result": result}
                 )
-                if result["decision"] == "auto":
-                    merge_pr(client, repo_full_name, result["pr_number"])
-                else:
-                    await _notify_ask(
-                        enriched,
-                        repo_full_name,
-                        result["pr_number"],
-                        proposal,
-                    )
+                results.append(result)
             elif result["decision"] == "block":
                 result["issue_number"] = open_issue(
                     client,
@@ -273,9 +276,9 @@ async def run_pipeline(repo_full_name: str, installation_id: int) -> list[dict[s
                     enriched["package"],
                     result["reason"],
                 )
+                results.append(result)
             else:
                 raise ValueError(f"Unknown gate decision: {result['decision']}")
-            results.append(result)
         except Exception as error:
             logger.exception(
                 "Pipeline failed while processing %s in %s",
@@ -285,5 +288,75 @@ async def run_pipeline(repo_full_name: str, installation_id: int) -> list[dict[s
             failed = _result(vulnerability, "error", "finding processing failed")
             failed["error"] = str(error)
             results.append(failed)
+
+    for package, candidates in actionable_by_package.items():
+        try:
+            existing_item = find_existing_bastion_item(client, repo_full_name, None, package)
+            if existing_item is not None:
+                logger.info(
+                    "Skipping consolidated action for %s because item #%s already tracks it",
+                    package,
+                    existing_item,
+                )
+                for candidate in candidates:
+                    candidate["result"].update(
+                        decision="duplicate",
+                        reason="already tracked by Bastion",
+                        duplicate_of=existing_item,
+                    )
+                continue
+
+            selected = max(
+                candidates,
+                key=lambda candidate: _version_key(candidate["proposal"]["target_version"]),
+            )
+            consolidated_decision = (
+                "auto"
+                if all(candidate["result"]["decision"] == "auto" for candidate in candidates)
+                else "ask"
+            )
+            consolidated_with = [
+                candidate["finding"]["cve_id"]
+                for candidate in candidates
+            ]
+            pr_number = open_pr(
+                client,
+                repo_full_name,
+                selected["finding"]["cve_id"],
+                package,
+                selected["finding"]["current_version"],
+                selected["proposal"]["target_version"],
+                selected["proposal"]["diff"],
+                _consolidated_rationale(candidates),
+            )
+            if consolidated_decision == "auto":
+                merge_pr(client, repo_full_name, pr_number)
+            else:
+                await _notify_ask(
+                    selected["finding"],
+                    repo_full_name,
+                    pr_number,
+                    selected["proposal"],
+                )
+            for candidate in candidates:
+                others = [
+                    cve_id
+                    for cve_id in consolidated_with
+                    if cve_id != candidate["finding"]["cve_id"]
+                ]
+                candidate["result"].update(
+                    decision=consolidated_decision,
+                    pr_number=pr_number,
+                )
+                if others:
+                    candidate["result"]["consolidated_with"] = others
+        except Exception as error:
+            logger.exception("Pipeline failed while consolidating %s", package)
+            for candidate in candidates:
+                candidate["result"].update(
+                    decision="error",
+                    reason="consolidated finding processing failed",
+                    error=str(error),
+                )
     logger.info("Finished Bastion pipeline for %s with %s results", repo_full_name, len(results))
     return results

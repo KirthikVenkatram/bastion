@@ -5,6 +5,7 @@ import pytest
 from github import GithubException
 
 from app.github_app.actions import (
+    BastionActionError,
     DISCLOSURE_FOOTER,
     find_existing_bastion_item,
     merge_pr,
@@ -63,6 +64,11 @@ def test_open_pr_creates_branch_updates_manifest_and_opens_pr(
         "requests==2.32.0\n",
         sha="manifest-sha",
         branch="bastion/requests-2.32.0-cve20241234",
+    )
+    assert repo.create_pull.call_args.kwargs["body"] == (
+        "Bumps requests to its fixed version."
+        + DISCLOSURE_FOOTER
+        + "\n\n<!-- bastion-tracking: CVE-2024-1234:requests -->"
     )
 
 
@@ -130,11 +136,68 @@ def test_open_pr_reuses_existing_branch_when_ref_already_exists(
     assert repo.update_file.call_args.kwargs["branch"] == (
         "bastion/requests-2.32.0-cve20241234"
     )
-    assert repo.create_pull.call_args.kwargs["body"] == (
-        "Bumps requests to its fixed version."
-        + DISCLOSURE_FOOTER
-        + "\n\n<!-- bastion-tracking: CVE-2024-1234:requests -->"
+
+
+def test_open_pr_reuses_branch_with_existing_fix_without_new_commit(
+    client_and_repo: tuple[MagicMock, MagicMock], requirements_diff: str
+) -> None:
+    client, repo = client_and_repo
+    repo.create_pull.return_value.number = 42
+    repo.create_git_ref.side_effect = GithubException(
+        422, {"message": "Reference already exists"}, {}
     )
+    repo.get_contents.return_value.decoded_content = b"requests==2.32.0\n"
+    base_branch = MagicMock()
+    base_branch.commit.sha = "base-sha"
+    existing_branch = MagicMock()
+    existing_branch.commit.sha = "existing-sha"
+    repo.get_branch.side_effect = lambda name: (
+        base_branch if name == "main" else existing_branch
+    )
+
+    pr_number = open_pr(
+        client,
+        "acme/project",
+        "CVE-2024-1234",
+        "requests",
+        "2.31.0",
+        "2.32.0",
+        requirements_diff,
+        "Bumps requests to its fixed version.",
+    )
+
+    assert pr_number == 42
+    repo.update_file.assert_not_called()
+    repo.create_pull.assert_called_once()
+
+
+def test_open_pr_reused_branch_raises_on_stale_diff_mismatch(
+    client_and_repo: tuple[MagicMock, MagicMock], requirements_diff: str
+) -> None:
+    client, repo = client_and_repo
+    repo.create_git_ref.side_effect = GithubException(
+        422, {"message": "Reference already exists"}, {}
+    )
+    repo.get_contents.return_value.decoded_content = b"requests==2.30.0\n"
+    base_branch = MagicMock()
+    base_branch.commit.sha = "base-sha"
+    existing_branch = MagicMock()
+    existing_branch.commit.sha = "existing-sha"
+    repo.get_branch.side_effect = lambda name: (
+        base_branch if name == "main" else existing_branch
+    )
+
+    with pytest.raises(BastionActionError):
+        open_pr(
+            client,
+            "acme/project",
+            "CVE-2024-1234",
+            "requests",
+            "2.31.0",
+            "2.32.0",
+            requirements_diff,
+            "Bumps requests to its fixed version.",
+        )
 
 
 def test_merge_pr_uses_squash_merge(client_and_repo: tuple[MagicMock, MagicMock]) -> None:

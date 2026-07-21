@@ -28,10 +28,10 @@ def _tracking_marker(cve_id: str, package: str) -> str:
 
 
 def find_existing_bastion_item(
-    client: Github, repo_full_name: str, cve_id: str, package: str
+    client: Github, repo_full_name: str, cve_id: str | None, package: str
 ) -> int | None:
-    """Return the number of an open issue or PR already tracking a finding."""
-    marker = _tracking_marker(cve_id, package)
+    """Return the number of an open issue or PR already tracking a finding or package."""
+    marker = _tracking_marker(cve_id, package) if cve_id is not None else f":{package} -->"
     try:
         repository = client.get_repo(repo_full_name)
         for item in repository.get_issues(state="open"):
@@ -115,6 +115,17 @@ def _is_existing_reference_error(error: GithubException) -> bool:
     return error.status == 422 and "reference already exists" in str(error).lower()
 
 
+def _is_existing_pull_request_error(error: GithubException) -> bool:
+    return error.status == 422 and "pull request already exists" in str(error).lower()
+
+
+def _find_open_pull_request_for_branch(repo: object, branch_name: str) -> int | None:
+    for pull_request in repo.get_pulls(state="open"):
+        if pull_request.head.ref == branch_name:
+            return pull_request.number
+    return None
+
+
 def open_pr(
     client: Github,
     repo_full_name: str,
@@ -131,11 +142,13 @@ def open_pr(
         default_branch = repo.default_branch
         branch_name = _branch_name(package, target_version, cve_id)
         base_branch = repo.get_branch(default_branch)
+        reused_branch = False
         try:
             repo.create_git_ref(ref=f"refs/heads/{branch_name}", sha=base_branch.commit.sha)
         except GithubException as error:
             if not _is_existing_reference_error(error):
                 raise
+            reused_branch = True
             existing_branch = repo.get_branch(branch_name)
             logger.warning(
                 "Reusing existing Bastion branch %s at %s",
@@ -145,22 +158,43 @@ def open_pr(
 
         manifest_path = _manifest_path(diff)
         manifest_path, manifest = _get_current_manifest(repo, manifest_path, branch_name)
-        updated_content = _apply_diff(manifest.decoded_content.decode("utf-8"), diff)
-        repo.update_file(
-            manifest_path,
-            f"Bastion: bump {package} to {target_version}",
-            updated_content,
-            sha=manifest.sha,
-            branch=branch_name,
-        )
+        manifest_content = manifest.decoded_content.decode("utf-8")
+        if reused_branch and target_version in manifest_content:
+            logger.warning(
+                "Reused Bastion branch %s already contains version %s",
+                branch_name,
+                target_version,
+            )
+        else:
+            updated_content = _apply_diff(manifest_content, diff)
+            repo.update_file(
+                manifest_path,
+                f"Bastion: bump {package} to {target_version}",
+                updated_content,
+                sha=manifest.sha,
+                branch=branch_name,
+            )
         title = f"Bastion: bump {package} {current_version} -> {target_version}"
-        pull_request = repo.create_pull(
-            title=title,
-            body=f"{rationale}{DISCLOSURE_FOOTER}\n\n{_tracking_marker(cve_id, package)}",
-            head=branch_name,
-            base=default_branch,
-        )
-        return pull_request.number
+        try:
+            pull_request = repo.create_pull(
+                title=title,
+                body=f"{rationale}{DISCLOSURE_FOOTER}\n\n{_tracking_marker(cve_id, package)}",
+                head=branch_name,
+                base=default_branch,
+            )
+            return pull_request.number
+        except GithubException as error:
+            if not _is_existing_pull_request_error(error):
+                raise
+            existing_pull_request = _find_open_pull_request_for_branch(repo, branch_name)
+            if existing_pull_request is None:
+                raise
+            logger.warning(
+                "Reusing existing pull request #%s for branch %s",
+                existing_pull_request,
+                branch_name,
+            )
+            return existing_pull_request
     except (GithubException, UnicodeDecodeError, ValueError) as error:
         _raise_action_error("pull request creation", error)
 
