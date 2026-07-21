@@ -1,13 +1,15 @@
-"""Generate tightly scoped dependency-fix proposals with GPT-5.6."""
+"""Generate tightly scoped dependency-fix proposals with a hosted GPT model."""
 from __future__ import annotations
 
 import json
 import logging
+import os
 from typing import Any
 
-from openai import AsyncOpenAI
+import openai
 
-MODEL = "gpt-5.6"
+MODEL = "openai/gpt-oss-120b"
+GROQ_BASE_URL = "https://api.groq.com/openai/v1"
 MANIFEST_FILENAMES = {"package.json", "requirements.txt", "pyproject.toml"}
 
 logger = logging.getLogger(__name__)
@@ -120,16 +122,25 @@ def _validated_proposal(
 async def propose_fix(finding: dict[str, Any]) -> dict[str, str] | None:
     """Return a validated manifest-only patch proposal, or ``None`` if unsafe."""
     try:
-        client = AsyncOpenAI()
-        completion = await client.chat.completions.create(
-            model=MODEL,
-            messages=[
+        client = openai.OpenAI(
+            api_key=os.environ["GROQ_API_KEY"], base_url=GROQ_BASE_URL
+        )
+        request = {
+            "model": MODEL,
+            "messages": [
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": json.dumps(finding)},
             ],
-            response_format=PROPOSAL_SCHEMA,
-            timeout=30.0,
-        )
+            "timeout": 30.0,
+        }
+        try:
+            completion = client.chat.completions.create(
+                **request, response_format=PROPOSAL_SCHEMA
+            )
+        except Exception as error:
+            if "response_format" not in str(error).lower():
+                raise
+            completion = client.chat.completions.create(**request)
         content = completion.choices[0].message.content
         if content is None:
             raise ValueError("Model returned an empty patch proposal")
