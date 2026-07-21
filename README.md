@@ -1,14 +1,18 @@
 # Bastion
 
+<p align="center">
+  <img src="docs/Bastion_Logo.png" alt="Bastion logo" width="128">
+</p>
+
 **Exploitability-driven, policy-gated autonomous CVE remediation** — built with Codex and GPT-5.6 for OpenAI Build Week.
 
 Bastion is a GitHub App that watches any repo, resolves its dependencies to known CVEs, and decides — using real exploit data, not vibes — whether to fix automatically, ask a human, or block entirely.
 
-<!-- ![Architecture diagram](docs/architecture.png) -->
+**[Install Bastion on your repo →](https://github.com/apps/bastion-remediator)**
 
-## The core idea
+## Architecture
 
-Most dependency bots tell you *what's* vulnerable. Bastion decides *what to do about it* — and the decision isn't made by the LLM.
+![Bastion architecture](docs/Bastion_Arch.png)
 
 1. Scan a repo's manifest (`package.json`, `requirements.txt`, `pyproject.toml`)
 2. Resolve dependencies to CVEs via [OSV.dev](https://osv.dev)
@@ -23,20 +27,22 @@ The model proposes. Policy disposes. That boundary is explicit, auditable, and c
 
 ## See it in action
 
-<!-- ![GitHub issue opened by Bastion](docs/screenshot-issue.png) -->
-<!-- ![GitHub PR opened by Bastion](docs/screenshot-pr.png) -->
-<!-- ![Email notification for the ask path](docs/screenshot-email.png) -->
-
 A real run against a test repo with outdated `requests`, `urllib3`, and `pyyaml`:
-- CVEs requiring a major version bump → **blocked**, issue opened with the reasoning
-- A patch-level `urllib3` fix → **PR opened**, maintainer emailed with the EPSS/KEV data and a link to review
-- No confident fix available → **blocked** immediately, before the policy is even consulted
+
+**Blocked — major version bump, policy declines to auto-fix:**
+![Issue opened by Bastion](docs/screenshot-issue.png)
+
+**Ask — patch-level fix, PR opened for review:**
+![PR opened by Bastion](docs/screenshot-pr.png)
+
+**Ask — maintainer notified by email with the full risk picture:**
+![Email notification](docs/screenshot-email.png)
 
 ## Try it yourself
 
-Install the Bastion GitHub App on any Python or Node repo with an outdated dependency, then push a commit. Bastion scans on push and acts within seconds — no setup on your end, judges test against our live deployment.
+Install Bastion on any Python or Node repo with an outdated dependency, then push a commit. Bastion scans on push and acts within seconds — no setup on your end, judges test against our live deployment.
 
-**[Install Bastion →](#)** <!-- replace with your GitHub App public install URL -->
+**[Install Bastion →](https://github.com/apps/bastion-remediator)**
 
 Demo repo, if you want to see it fresh: [`bastion-demo-app`](https://github.com/KirthikVenkatram/bastion-demo-app)
 
@@ -59,7 +65,7 @@ uvicorn app.github_app.webhook:app --reload
 
 Required env vars: GitHub App credentials, `GROQ_API_KEY` (fix proposals), `RESEND_API_KEY` + `NOTIFY_EMAIL_FROM` + `NOTIFY_EMAIL_TO` (ask-path notifications). See `.env.example` for the full list — OSV.dev, EPSS, and CISA KEV need no keys at all.
 
-## Architecture
+## Pipeline
 
 ```
 GitHub App install → scan manifest → resolve CVEs (OSV.dev)
